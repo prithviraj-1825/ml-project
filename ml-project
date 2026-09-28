@@ -1,0 +1,238 @@
+# Cell 1: Universal Environment Setup & Kaggle Dataset Acquisition
+import os
+import glob
+import zipfile
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, classification_report
+
+# Automatically detect or prompt for Kaggle credentials setup
+if not os.path.exists("kaggle.json"):
+    from google.colab import files
+    print("Please upload your kaggle.json API token:")
+    uploaded = files.upload()
+
+os.makedirs(os.path.expanduser("~/.kaggle"), exist_ok=True)
+if os.path.exists("kaggle.json"):
+    !cp kaggle.json ~/.kaggle/
+    !chmod 600 ~/.kaggle/kaggle.json
+
+# Download and extract PaySim dataset if not already present
+csv_files = glob.glob("*.csv")
+if not csv_files:
+    print("Downloading PaySim dataset from Kaggle...")
+    !kaggle datasets download -d ealaxi/paysim1
+    for zf in glob.glob("*.zip"):
+        with zipfile.ZipFile(zf, "r") as zip_ref:
+            zip_ref.extractall(".")
+    csv_files = glob.glob("*.csv")
+
+print("Dataset files detected:", csv_files)
+
+import glob
+import pandas as pd
+
+
+def load_and_preprocess_data(file_path):
+    """Universally loads and preprocesses financial transaction logs.
+
+    Automatically adapts whether processing PaySim schema or general credit
+    card / ledger datasets.
+    """
+    df = pd.read_csv(file_path)
+    print(f"Original Dataset Shape: {df.shape}")
+
+    # Safely drop missing values and duplicates
+    df_cleaned = df.dropna().drop_duplicates().copy()
+
+    # Dynamic target identifier
+    target_candidates = ["isFraud", "Class", "target", "fraud"]
+    target_col = next(
+        (col for col in target_candidates if col in df_cleaned.columns), None
+    )
+
+    if not target_col:
+        raise ValueError("Target label column not found in dataset schema!")
+
+    # Check for PaySim schema
+    paysim_columns = {
+        "oldbalanceOrg",
+        "newbalanceOrig",
+        "oldbalanceDest",
+        "newbalanceDest",
+    }
+
+    if paysim_columns.issubset(df_cleaned.columns):
+        print(
+            "Detected PaySim ledger schema. Applying balance-error feature"
+            " engineering..."
+        )
+
+        # Filter for fraudulent transaction types
+        if "type" in df_cleaned.columns:
+            df_cleaned = df_cleaned[
+                df_cleaned["type"].isin(["TRANSFER", "CASH_OUT"])
+            ].copy()
+
+        # Domain-specific metrics
+        df_cleaned["errorBalanceOrig"] = (
+            df_cleaned["newbalanceOrig"]
+            + df_cleaned["amount"]
+            - df_cleaned["oldbalanceOrg"]
+        )
+        df_cleaned["errorBalanceDest"] = (
+            df_cleaned["oldbalanceDest"]
+            + df_cleaned["amount"]
+            - df_cleaned["newbalanceDest"]
+        )
+
+        if "step" in df_cleaned.columns:
+            df_cleaned["hour"] = df_cleaned["step"] % 24
+
+        # Extract target safely directly from df_cleaned
+        y = df_cleaned[target_col].copy()
+
+        # Encode categorical types safely (removed invalid errors='ignore')
+        if "type" in df_cleaned.columns:
+            df_cleaned = pd.get_dummies(
+                df_cleaned, columns=["type"], drop_first=True
+            )
+
+        drop_cols = ["nameOrig", "nameDest", "step", "isFlaggedFraud", target_col]
+        X = df_cleaned.drop(
+            columns=[c for c in drop_cols if c in df_cleaned.columns]
+        )
+
+    else:
+        print(
+            "Detected standard tabular schema. Applying general"
+            " preprocessing..."
+        )
+
+        # Separate target first
+        y = df_cleaned[target_col].copy()
+        df_features = df_cleaned.drop(columns=[target_col])
+
+        # Safely split categoricals before transforming to avoid iteration bugs
+        cat_cols = df_features.select_dtypes(
+            include=["object", "category"]
+        ).columns
+        high_card_cols = [
+            col for col in cat_cols if df_features[col].nunique() >= 50
+        ]
+        low_card_cols = [
+            col for col in cat_cols if df_features[col].nunique() < 50
+        ]
+
+        # Drop high cardinality string features and one-hot encode remaining
+        df_features = df_features.drop(columns=high_card_cols)
+        X = pd.get_dummies(df_features, columns=low_card_cols, drop_first=True)
+
+    return X, y
+
+
+# Safe execution block
+csv_files = glob.glob("*.csv")
+if not csv_files:
+    raise FileNotFoundError("No CSV files found in the current directory.")
+
+X, y = load_and_preprocess_data(csv_files[0])
+print(f"Processed Feature Matrix Shape: {X.shape}")
+print(f"Target Vector Shape: {y.shape}")
+
+# Cell 3: Train-Test Splitting and Feature Scaling
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+print("Training features scaled shape:", X_train_scaled.shape)
+print("Testing features scaled shape:", X_test_scaled.shape)
+
+# Cell 4: Iteration 1 - Baseline Model (Logistic Regression with Class Weights)
+baseline_model = LogisticRegression(max_iter=1000, random_state=42, class_weight='balanced')
+baseline_model.fit(X_train_scaled, y_train)
+
+y_pred_baseline = baseline_model.predict(X_test_scaled)
+
+print("--- Iteration 1: Baseline Logistic Regression Results ---")
+print(f"Accuracy:  {accuracy_score(y_test, y_pred_baseline):.4f}")
+print(f"Precision: {precision_score(y_test, y_pred_baseline, zero_division=0):.4f}")
+print(f"Recall:    {recall_score(y_test, y_pred_baseline, zero_division=0):.4f}")
+print(f"F1-Score:  {f1_score(y_test, y_pred_baseline, zero_division=0):.4f}")
+
+# Cell 5: Iteration 2 - Final Approach (Random Forest Classifier)
+rf_model = RandomForestClassifier(
+    n_estimators=100,
+    max_depth=15,
+    random_state=42,
+    class_weight='balanced',
+    n_jobs=-1
+)
+# Random forest can operate directly on unscaled data for tree splits
+rf_model.fit(X_train, y_train)
+
+y_pred_rf = rf_model.predict(X_test)
+
+print("--- Iteration 2: Refined Random Forest Model Results ---")
+print(f"Accuracy:  {accuracy_score(y_test, y_pred_rf):.4f}")
+print(f"Precision: {precision_score(y_test, y_pred_rf, zero_division=0):.4f}")
+print(f"Recall:    {recall_score(y_test, y_pred_rf, zero_division=0):.4f}")
+print(f"F1-Score:  {f1_score(y_test, y_pred_rf, zero_division=0):.4f}")
+print("\nClassification Report:\n", classification_report(y_test, y_pred_rf))
+
+# Cell 6: Evaluation Artifact Generation (Figure 6.1 Confusion Matrix)
+plt.figure(figsize=(7, 5))
+cm = confusion_matrix(y_test, y_pred_rf)
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=False,
+            xticklabels=['Predicted Legitimate', 'Predicted Fraud'],
+            yticklabels=['Actual Legitimate', 'Actual Fraud'])
+plt.title('Figure 6.1: Confusion Matrix - Final Random Forest Model')
+plt.xlabel('Predicted Label')
+plt.ylabel('True Label')
+plt.tight_layout()
+plt.show()
+
+# Cell 7: Production-Ready Inference Simulation Engine
+def simulate_live_inference(sample_data_dict):
+    """
+    Simulates real-time inference on a incoming transaction dictionary payload.
+    """
+    input_df = pd.DataFrame([sample_data_dict])
+
+    # Handle schema alignment automatically
+    for col in X.columns:
+        if col not in input_df.columns:
+            input_df[col] = 0
+    input_df = input_df[X.columns]
+
+    prediction = rf_model.predict(input_df)
+    probability = rf_model.predict_proba(input_df)[0][1]
+
+    status = "FRAUDULENT" if prediction[0] == 1 else "LEGITIMATE"
+    print(f"Live Transaction Assessment: {status} (Fraud Risk Probability: {probability * 100:.2f}%)")
+
+# Example validation payload matching PaySim feature structure
+sample_transaction = {
+    'amount': 250000.00,
+    'oldbalanceOrg': 250000.00,
+    'newbalanceOrig': 0.00,
+    'oldbalanceDest': 0.00,
+    'newbalanceDest': 250000.00,
+    'errorBalanceOrig': 0.00,
+    'errorBalanceDest': 0.00,
+    'hour': 14,
+    'type_TRANSFER': 1
+}
+
+simulate_live_inference(sample_transaction)
+
